@@ -3,7 +3,7 @@ import { workerEvents } from '../events/constants.js';
 
 console.log('Model training worker initialized');
 let _globalCtx = {}
-let _model = {}
+let _model = null
 
 const WEIGHTS = {
     age: 0.1,
@@ -84,7 +84,7 @@ function encodeProduct(product, context) {
 
     const color = oneHotWeighted(context.colorIndex[product.color], context.numColors, WEIGHTS.color)
 
-    return tf.concat1d([age, price, category, color])
+    return tf.concat1d([price, age, category, color])
 }
 
 function encodeUser(user, context) {
@@ -97,6 +97,18 @@ function encodeUser(user, context) {
         .mean(0)
         .reshape([1, context.dimensions])
     }
+
+    return tf.concat1d(
+        [
+            tf.zeros([1]), // Ignore Price
+            tf.tensor1d([
+                normalize(user.age, context.minAge, context.maxAge)
+                * WEIGHTS.age
+            ]),
+            tf.zeros([context.numCategories]), // Ignore Category
+            tf.zeros([context.numColors]), // Ignore Color
+        ]
+    ).reshape([1, context.dimensions])
 }
 
 function createTrainingData(context) {
@@ -182,6 +194,8 @@ async function configureNeuralNetAndTrain(trainData){
             }
         }
     })
+
+    return model
 }
 
 async function trainModel({ users }) {
@@ -207,12 +221,35 @@ async function trainModel({ users }) {
     postMessage({ type: workerEvents.trainingComplete });
 }
 function recommend(user, ctx) {
-    console.log('will recommend for user:', user)
-    // postMessage({
-    //     type: workerEvents.recommend,
-    //     user,
-    //     recommendations: []
-    // });
+    if(!_model) return
+    const context = _globalCtx
+
+    const userVector = encodeUser(user, context).dataSync()
+    const input = context.productVectors.map(({vector}) => {
+        return [...userVector, ...vector]
+    })
+
+    const inputTensor = tf.tensor2d(input)
+    const predictions = _model.predict(inputTensor)
+
+    const scores = predictions.dataSync()
+
+    const recommendations = context.productVectors.map((item, index) => {
+        return {
+            ...item.meta,
+            name: item.name,
+            score: scores[index]
+        }
+    })
+
+    const sortedItems = recommendations.sort((a, b) => b.score - a.score)
+
+    postMessage(
+        {
+            type: workerEvents.recommend,
+            user,
+            recommendations: sortedItems
+        });
 }
 
 
